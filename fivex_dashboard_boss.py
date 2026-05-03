@@ -391,7 +391,7 @@ with col1:
         ch["sort_key"] = ch["api_type"].apply(lambda x: CHANNEL_ORDER.index(x) if x in CHANNEL_ORDER else 99)
         ch = ch.sort_values("sort_key").drop(columns=["api_type","sort_key"])
         ch = ch[["Channel","Revenue","Orders","Units","AOV","Profit","Margin","Returns","Cancelled"]]
-        st.dataframe(ch, use_container_width=True, hide_index=True, height=230)
+        st.dataframe(ch, use_container_width=True, hide_index=True, height=260)
 
 with col2:
     st.markdown('<div class="section-title">Sales by Country</div>', unsafe_allow_html=True)
