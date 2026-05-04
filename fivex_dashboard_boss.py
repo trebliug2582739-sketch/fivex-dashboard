@@ -356,42 +356,97 @@ if not orders_f.empty:
         "Adjusted Revenue": ("net_revenue",   "€", "#2aaa9a"),
     }
     tcol, tpfx, tclr = tmap[tm]
-    daily = orders_f.groupby(orders_f["order_date"].dt.date)[tcol].sum().reset_index()
-    daily.columns = ["date","value"]
-    fig = px.line(daily, x="date", y="value", color_discrete_sequence=[tclr])
-    fig.update_traces(line_width=2, fill="tozeroy", fillcolor="rgba(3,102,97,0.15)")
+
+    # Use day numbers 1-31 as x axis so both months overlay perfectly
+    import calendar as cal_mod
+    month_end_day = cal_mod.monthrange(start_date.year, start_date.month)[1]
+    max_days = max(month_end_day, period_days)
+
+    # Current period - group by day number
+    daily = orders_f.groupby(orders_f["order_date"].dt.day)[tcol].sum().reset_index()
+    daily.columns = ["day","value"]
+    all_days = pd.DataFrame({"day": range(1, max_days+1)})
+    daily = all_days.merge(daily, on="day", how="left").fillna(0)
+    day_labels = [f"Day {d}" for d in range(1, max_days+1)]
+
+    # Previous period - group by day number
+    prev_orders_trend = to_num(fch(fdate(orders_df, "order_date", prev_start, prev_end), ch_filter), [tcol])
+    prev_daily = pd.DataFrame({"day": range(1, max_days+1), "prev_value": 0.0})
+    if not prev_orders_trend.empty:
+        prev_orders_trend["order_date"] = pd.to_datetime(prev_orders_trend["order_date"], errors="coerce")
+        prev_grp = prev_orders_trend.groupby(prev_orders_trend["order_date"].dt.day)[tcol].sum().reset_index()
+        prev_grp.columns = ["day","prev_value"]
+        prev_daily = pd.DataFrame({"day": range(1, max_days+1)}).merge(prev_grp, on="day", how="left").fillna(0)
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(name=f"Prev ({prev_start.strftime('%b %Y')})",
+                            x=day_labels, y=prev_daily["prev_value"],
+                            mode="lines", line=dict(color=C5, width=1.5, dash="dot")))
+    fig.add_trace(go.Scatter(name=f"Current ({start_date.strftime('%b %Y')})",
+                            x=day_labels, y=daily["value"],
+                            mode="lines", line=dict(color=tclr, width=2),
+                            fill="tozeroy", fillcolor="rgba(3,102,97,0.15)"))
     fig.update_layout(**{k:v for k,v in CHART_LAYOUT.items() if k not in ["xaxis","yaxis","legend"]}, height=420,
                      yaxis=dict(tickprefix=tpfx, gridcolor="rgba(107,162,159,0.15)", color=CSUB),
-                     xaxis=dict(gridcolor="rgba(107,162,159,0.15)", color=CSUB, tickformat="%b %d",
-                               range=[str(start_date), str(end_date)], nticks=20))
+                     xaxis=dict(gridcolor="rgba(107,162,159,0.15)", color=CSUB, nticks=16),
+                     legend=dict(orientation="h", y=1.08, font=dict(color=CTEXT, size=11)))
     st.plotly_chart(fig, use_container_width=True)
 
 # Channel Performance + Country Map
 col1, col2 = st.columns([1.2, 0.8])
 with col1:
     st.markdown('<div class="section-title">Channel Performance</div>', unsafe_allow_html=True)
-    if not orders_f.empty and "api_type" in orders_f.columns:
-        ch_ord = orders_f.groupby("api_type").agg(
-            Revenue=("gross_revenue","sum"), Orders=("order_number","nunique"),
-            Units=("quantity","sum"), Profit=("net_profit","sum")
-        ).reset_index()
-        ch_ret = returns_f.groupby("api_type").agg(Returns=("order_number","nunique")).reset_index() if not returns_f.empty and "api_type" in returns_f.columns else pd.DataFrame(columns=["api_type","Returns"])
-        ch_can = cancelled_f.groupby("api_type").agg(Cancelled=("order_number","nunique")).reset_index() if not cancelled_f.empty else pd.DataFrame(columns=["api_type","Cancelled"])
-        ch = ch_ord.merge(ch_ret, on="api_type", how="left").merge(ch_can, on="api_type", how="left").fillna(0)
-        ch["AOV"]    = (ch["Revenue"] / ch["Orders"]).round(2)
-        ch["Margin"] = (ch["Profit"] / ch["Revenue"] * 100).round(1).astype(str) + "%"
-        ch["Channel"] = ch["api_type"].map(CHANNEL_LABELS).fillna(ch["api_type"])
-        ch["Revenue"] = ch["Revenue"].apply(lambda x: f"€{x:,.0f}")
-        ch["AOV"]     = ch["AOV"].apply(lambda x: f"€{x:,.2f}")
-        ch["Profit"]  = ch["Profit"].apply(lambda x: f"€{x:,.0f}")
-        ch["Orders"]  = ch["Orders"].astype(int)
-        ch["Units"]   = ch["Units"].astype(int)
-        ch["Returns"] = ch["Returns"].astype(int)
-        ch["Cancelled"] = ch["Cancelled"].astype(int)
-        ch["sort_key"] = ch["api_type"].apply(lambda x: CHANNEL_ORDER.index(x) if x in CHANNEL_ORDER else 99)
-        ch = ch.sort_values("sort_key").drop(columns=["api_type","sort_key"])
-        ch = ch[["Channel","Revenue","Orders","Units","AOV","Profit","Margin","Returns","Cancelled"]]
-        st.dataframe(ch, use_container_width=True, hide_index=True, height=260)
+    # Always show all channels even with zero
+    base_ch = pd.DataFrame({"api_type": CHANNEL_ORDER})
+    ch_ord = orders_f.groupby("api_type").agg(
+        Revenue=("gross_revenue","sum"), Orders=("order_number","nunique"),
+        Units=("quantity","sum"), Profit=("net_profit","sum")
+    ).reset_index() if not orders_f.empty and "api_type" in orders_f.columns else pd.DataFrame(columns=["api_type","Revenue","Orders","Units","Profit"])
+    ch_ret = returns_f.groupby("api_type").agg(Returns=("order_number","nunique")).reset_index() if not returns_f.empty and "api_type" in returns_f.columns else pd.DataFrame(columns=["api_type","Returns"])
+    ch_can = cancelled_f.groupby("api_type").agg(Cancelled=("order_number","nunique")).reset_index() if not cancelled_f.empty else pd.DataFrame(columns=["api_type","Cancelled"])
+    ch = base_ch.merge(ch_ord, on="api_type", how="left").merge(ch_ret, on="api_type", how="left").merge(ch_can, on="api_type", how="left").fillna(0)
+    ch["AOV_raw"]    = (ch["Revenue"] / ch["Orders"]).where(ch["Orders"] > 0, 0).round(2)
+    ch["Margin_raw"] = (ch["Profit"] / ch["Revenue"] * 100).where(ch["Revenue"] > 0, 0).round(1)
+    ch["Channel"] = ch["api_type"].map(CHANNEL_LABELS).fillna(ch["api_type"])
+    ch["sort_key"] = ch["api_type"].apply(lambda x: CHANNEL_ORDER.index(x) if x in CHANNEL_ORDER else 99)
+    ch = ch.sort_values("sort_key").reset_index(drop=True)
+
+    # Total row
+    total_rev    = ch["Revenue"].sum()
+    total_ord    = int(ch["Orders"].sum())
+    total_units  = int(ch["Units"].sum())
+    total_profit = ch["Profit"].sum()
+    total_ret    = int(ch["Returns"].sum())
+    total_can    = int(ch["Cancelled"].sum())
+    avg_aov      = (total_rev / total_ord) if total_ord > 0 else 0
+    avg_margin   = (total_profit / total_rev * 100) if total_rev > 0 else 0
+
+    # Format display
+    ch_display = ch.copy()
+    ch_display["Revenue"]   = ch["Revenue"].apply(lambda x: f"€{x:,.0f}")
+    ch_display["AOV"]       = ch["AOV_raw"].apply(lambda x: f"€{x:,.2f}")
+    ch_display["Profit"]    = ch["Profit"].apply(lambda x: f"€{x:,.0f}")
+    ch_display["Margin"]    = ch["Margin_raw"].apply(lambda x: f"{x:.1f}%")
+    ch_display["Orders"]    = ch["Orders"].astype(int)
+    ch_display["Units"]     = ch["Units"].astype(int)
+    ch_display["Returns"]   = ch["Returns"].astype(int)
+    ch_display["Cancelled"] = ch["Cancelled"].astype(int)
+    ch_display = ch_display[["Channel","Revenue","Orders","Units","AOV","Profit","Margin","Returns","Cancelled"]]
+
+    # Add total/avg row
+    total_row = pd.DataFrame([{
+        "Channel": "TOTAL",
+        "Revenue": f"€{total_rev:,.0f}",
+        "Orders": total_ord,
+        "Units": total_units,
+        "AOV": f"€{avg_aov:,.2f}",
+        "Profit": f"€{total_profit:,.0f}",
+        "Margin": f"{avg_margin:.1f}%",
+        "Returns": total_ret,
+        "Cancelled": total_can
+    }])
+    ch_display = pd.concat([ch_display, total_row], ignore_index=True)
+    st.dataframe(ch_display, use_container_width=True, hide_index=True, height=290)
 
 with col2:
     st.markdown('<div class="section-title">Sales by Country</div>', unsafe_allow_html=True)
@@ -426,18 +481,36 @@ with col2:
 col1, col2 = st.columns(2)
 with col1:
     st.markdown('<div class="section-title">Week over Week Revenue & Profit</div>', unsafe_allow_html=True)
-    if not orders_f.empty:
-        orders_f["week"] = orders_f["order_date"].dt.isocalendar().week
-        wow = orders_f.groupby("week").agg(revenue=("gross_revenue","sum"), profit=("net_profit","sum")).reset_index()
-        wow["week"] = "Week " + wow["week"].astype(str)
+    # Use ALL orders data (not filtered) for week over week - ignore date filter
+    all_orders_wow = to_num(orders_df.copy(), ["gross_revenue","net_profit"])
+    all_orders_wow["order_date"] = pd.to_datetime(all_orders_wow["order_date"], errors="coerce")
+    if not all_orders_wow.empty:
+        all_orders_wow["week"] = all_orders_wow["order_date"].dt.isocalendar().week.astype(int)
+        all_orders_wow["year"] = all_orders_wow["order_date"].dt.isocalendar().year.astype(int)
+
+        # Get all weeks from week 1 to current/end week for selected year
+        selected_year = end_date.year
+        current_week  = int(pd.Timestamp(str(end_date)).isocalendar().week)
+        all_weeks     = list(range(1, current_week + 1))
+        base_wow      = pd.DataFrame({"week": all_weeks})
+
+        wow = all_orders_wow[all_orders_wow["year"] == selected_year].groupby("week").agg(
+            revenue=("gross_revenue","sum"), profit=("net_profit","sum")
+        ).reset_index()
+        wow = base_wow.merge(wow, on="week", how="left").fillna(0)
+        wow["week_label"] = "W" + wow["week"].astype(str)
+
         fig = go.Figure()
-        fig.add_trace(go.Bar(name="Revenue", x=wow["week"], y=wow["revenue"], marker_color=C1, opacity=0.85))
-        fig.add_trace(go.Scatter(name="Profit", x=wow["week"], y=wow["profit"],
-                                mode="lines+markers", line=dict(color=C5, width=2), marker=dict(size=6)))
+        fig.add_trace(go.Bar(name="Revenue", x=wow["week_label"], y=wow["revenue"], marker_color=C1, opacity=0.85))
+        fig.add_trace(go.Scatter(name="Profit", x=wow["week_label"], y=wow["profit"],
+                                mode="lines+markers", line=dict(color=C5, width=2), marker=dict(size=5)))
         fig.update_layout(**{k:v for k,v in CHART_LAYOUT.items() if k not in ["xaxis","yaxis","legend"]}, height=300,
                          yaxis=dict(tickprefix="€", gridcolor="rgba(107,162,159,0.15)", color=CSUB),
+                         xaxis=dict(color=CSUB, gridcolor="rgba(107,162,159,0.15)"),
                          legend=dict(orientation="h", y=1.1, font=dict(color=CTEXT, size=11)))
         st.plotly_chart(fig, use_container_width=True)
+    elif not orders_f.empty:
+        st.info("No data available for week over week chart.")
 
 with col2:
     st.markdown('<div class="section-title">Profit Breakdown</div>', unsafe_allow_html=True)
