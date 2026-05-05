@@ -400,13 +400,55 @@ with col1:
     base_ch = pd.DataFrame({"api_type": CHANNEL_ORDER})
     ch_ord = orders_f.groupby("api_type").agg(
         Revenue=("gross_revenue","sum"), Orders=("order_number","nunique"),
-        Units=("quantity","sum"), Profit=("net_profit","sum")
-    ).reset_index() if not orders_f.empty and "api_type" in orders_f.columns else pd.DataFrame(columns=["api_type","Revenue","Orders","Units","Profit"])
-    ch_ret = returns_f.groupby("api_type").agg(Returns=("order_number","nunique")).reset_index() if not returns_f.empty and "api_type" in returns_f.columns else pd.DataFrame(columns=["api_type","Returns"])
-    ch_can = cancelled_f.groupby("api_type").agg(Cancelled=("order_number","nunique")).reset_index() if not cancelled_f.empty else pd.DataFrame(columns=["api_type","Cancelled"])
-    ch = base_ch.merge(ch_ord, on="api_type", how="left").merge(ch_ret, on="api_type", how="left").merge(ch_can, on="api_type", how="left").fillna(0)
-    ch["AOV_raw"]    = (ch["Revenue"] / ch["Orders"]).where(ch["Orders"] > 0, 0).round(2)
-    ch["Margin_raw"] = (ch["Profit"] / ch["Revenue"] * 100).where(ch["Revenue"] > 0, 0).round(1)
+        Units=("quantity","sum"), BTW=("btw","sum"),
+        Commission=("commission","sum"), Delivery=("delivery_costs","sum"),
+        PickPack=("pick_pack_costs","sum"), Extra=("extra_costs","sum"),
+        Purchase=("purchase_costs","sum")
+    ).reset_index() if not orders_f.empty and "api_type" in orders_f.columns else pd.DataFrame(columns=["api_type","Revenue","Orders","Units","BTW","Commission","Delivery","PickPack","Extra","Purchase"])
+
+    # Returns per channel — use all returns including those without api_type
+    total_returns_count = returns_f["order_number"].nunique() if not returns_f.empty else 0
+    ch_ret = returns_f.groupby("api_type").agg(
+        Returns=("order_number","nunique"),
+        RetNetRev=("net_revenue","sum"),
+        RetCommission=("commission","sum"),
+        RetDelivery=("delivery_costs","sum"),
+        RetPickPack=("pick_pack_costs","sum"),
+        RetExtra=("extra_costs","sum"),
+        RetPurchase=("purchase_costs","sum"),
+        RetShipping=("delivery_costs","sum")
+    ).reset_index() if not returns_f.empty and "api_type" in returns_f.columns else pd.DataFrame(columns=["api_type","Returns","RetNetRev","RetCommission","RetDelivery","RetPickPack","RetExtra","RetPurchase","RetShipping"])
+
+    ch_can = cancelled_f.groupby("api_type").agg(
+        Cancelled=("order_number","nunique"),
+        CanNetRev=("net_revenue","sum"),
+        CanCommission=("commission","sum"),
+        CanDelivery=("delivery_costs","sum"),
+        CanPickPack=("pick_pack_costs","sum"),
+        CanExtra=("extra_costs","sum"),
+        CanPurchase=("purchase_costs","sum")
+    ).reset_index() if not cancelled_f.empty else pd.DataFrame(columns=["api_type","Cancelled","CanNetRev","CanCommission","CanDelivery","CanPickPack","CanExtra","CanPurchase"])
+
+    ch = base_ch.merge(ch_ord, on="api_type", how="left").merge(ch_ret, on="api_type", how="left").merge(ch_can, on="api_type", how="left").infer_objects(copy=False).fillna(0)
+
+    # Calculate proper profit per channel same way as scorecards
+    ch["NetRev"]       = ch["Revenue"] - ch["BTW"]
+    ch["RetNetRev"]    = ch["RetNetRev"] if "RetNetRev" in ch.columns else 0
+    ch["CanNetRev"]    = ch["CanNetRev"] if "CanNetRev" in ch.columns else 0
+    ch["AdjRev"]       = ch["NetRev"] - ch["RetNetRev"] - ch["CanNetRev"]
+    ch["NetCommission"]= ch["Commission"] - ch["RetCommission"] - ch["CanCommission"]
+    ch["NetDelivery"]  = ch["Delivery"] - ch["RetDelivery"] - ch["CanDelivery"]
+    ch["NetPickPack"]  = ch["PickPack"] - ch["RetPickPack"] - ch["CanPickPack"]
+    ch["NetExtra"]     = ch["Extra"] - ch["RetExtra"] - ch["CanExtra"]
+    ch["NetPurchase"]  = ch["Purchase"] - ch["RetPurchase"] - ch["CanPurchase"]
+
+    # Distribute ads proportionally by revenue share
+    total_rev_for_ads = ch["Revenue"].sum()
+    ch["AdsShare"]    = (ch["Revenue"] / total_rev_for_ads * total_ads) if total_rev_for_ads > 0 else 0
+
+    ch["Profit"]       = ch["AdjRev"] - ch["AdsShare"] - ch["NetCommission"] - ch["NetPurchase"] - ch["NetDelivery"] - ch["NetPickPack"] - ch["NetExtra"]
+    ch["AOV_raw"]      = (ch["Revenue"] / ch["Orders"]).where(ch["Orders"] > 0, 0).round(2)
+    ch["Margin_raw"]   = (ch["Profit"] / ch["AdjRev"] * 100).where(ch["AdjRev"] > 0, 0).round(1)
     ch["Channel"] = ch["api_type"].map(CHANNEL_LABELS).fillna(ch["api_type"])
     ch["sort_key"] = ch["api_type"].apply(lambda x: CHANNEL_ORDER.index(x) if x in CHANNEL_ORDER else 99)
     ch = ch.sort_values("sort_key").reset_index(drop=True)
@@ -416,10 +458,12 @@ with col1:
     total_ord    = int(ch["Orders"].sum())
     total_units  = int(ch["Units"].sum())
     total_profit = ch["Profit"].sum()
-    total_ret    = int(ch["Returns"].sum())
+    total_adj_rev = ch["AdjRev"].sum()
+    # Use total returns from scorecard to match
+    total_ret    = total_returns_count
     total_can    = int(ch["Cancelled"].sum())
     avg_aov      = (total_rev / total_ord) if total_ord > 0 else 0
-    avg_margin   = (total_profit / total_rev * 100) if total_rev > 0 else 0
+    avg_margin   = (total_profit / total_adj_rev * 100) if total_adj_rev > 0 else 0
 
     # Format display
     ch_display = ch.copy()
@@ -483,8 +527,9 @@ with col1:
     st.markdown('<div class="section-title">Week over Week Revenue & Profit</div>', unsafe_allow_html=True)
     # Use ALL orders data (not filtered) for week over week - ignore date filter
     all_orders_wow = to_num(orders_df.copy(), ["gross_revenue","net_profit"])
-    all_orders_wow["order_date"] = pd.to_datetime(all_orders_wow["order_date"], errors="coerce")
-    if not all_orders_wow.empty:
+    if not all_orders_wow.empty and "order_date" in all_orders_wow.columns:
+        all_orders_wow["order_date"] = pd.to_datetime(all_orders_wow["order_date"], errors="coerce")
+    if not all_orders_wow.empty and "order_date" in all_orders_wow.columns:
         all_orders_wow["week"] = all_orders_wow["order_date"].dt.isocalendar().week.astype(int)
         all_orders_wow["year"] = all_orders_wow["order_date"].dt.isocalendar().year.astype(int)
 
